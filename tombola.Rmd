@@ -1,0 +1,248 @@
+---
+title: "Tombola analysis"
+output: 
+  html_document:
+    default
+  html_notebook:
+    default
+---
+# Tombola
+
+```{r, include=FALSE}
+library(tidyverse)
+library(memoise) # to cache function result
+theme_set(theme_bw())
+```
+
+TODO write intro about tombola
+
+# Mathematical analysis
+
+The objective is to understand at each point of the game what is the probability that a card makes tombola, and also for the minor prizes (ambo, terna, etc.)
+
+The probability that a card has a drawn number depends on two factors: the number of free numbers on the card and the number of numbers in the drum.
+
+The probability that a card has an "hit" (the number drawn is on the card is):
+
+$$P(H_{t, k}) = \frac{c-k}{d - t}$$
+where:
+
+- $t$ is the time step (how many numbers have been drawn)
+- $k$ is the class of the card (how many hits it had to far)
+- $P(H)$ is the probability of an hit
+- $d$ is the number of numbers in the drum
+- $c$ is the number of numbers in the card
+
+From this formula is possible to calculate the fraction of cards in a class $k$ at time $t$.
+
+This is the sum of two components: 
+
+- the fraction of card in the previous class ($k-1$) present at time $t-1$, that a time $t$ have an hit. Hence they increase the class at time $t$.
+- the fraction of the cards in the class $k$ at time $t-1$, that at time $t$ **don't** have an hit.
+
+or in math:
+
+$$N_{t,k} = N_{t-1, k-1}P(H_{t, k-1}) + N_{t-1, k}(1 - P(H_{t, k}))$$
+
+This equations are all what is needed to model the tombola game, so now it can be implemented in code
+
+## Implement in code
+
+### Step 1
+
+Naive implementation of the functions in code 
+
+```{r}
+p_H <- function(t,k){
+  (n_c - k) / (n_d - t)
+}
+```
+
+
+```{r}
+N <- function(t, k){
+  N(t-1, k-1) * p_H(t, k-1) + N(t-1, k) * (1 - p_H(t,k) )
+}
+```
+
+### Step 2
+
+The function `N` calls recursively itself, which works but it will never stop, so the solution is to have an initial state hardcoded into the function for `t=0`
+
+```{r}
+N <- function(t, k){
+  if(t == 0){
+    ifelse(k == 0, 1, 0) # 1 means all the card are in class 0
+  }
+  else{
+    N(t-1, k-1) * p_H(t-1, k-1) + N(t-1, k) * (1 - p_H(t-1,k)) 
+  }
+}
+```
+
+### Step 3
+
+The function `N` now it works but is very slow, because it needs to call itself a number of times that increase exponentially with `t`, so we use *memoization* to cache the results.
+
+In R it can be simply done as
+```{r}
+N <- memoise(N)
+```
+
+### Step 4
+
+Finally we want the system to be flexible and allow for different values of `n_c` and `n_d`
+
+```{r}
+# this functions returns the N function for a particular game
+get_game_N <- function(n_c, n_d){
+  
+  p_H <- function(t,k){
+        (n_c - k) / (n_d - t)
+  }
+  
+  N <- function(t, k){
+      if(t == 0){
+        ifelse(k == 0, 1, 0) # 1 means all the card are in class 0
+      }
+      else{
+        N(t-1, k-1) * p_H(t-1, k-1) + N(t-1, k) * (1 - p_H(t-1,k)) 
+      }
+    }
+  N <- memoise(N)
+  return(N)
+}
+```
+
+# Result
+
+## Tombola
+
+with all the code is possible to calculate the probabilities for each class at all time steps
+
+```{r}
+all_game_status <- function(n_c, n_d){
+  N <- get_game_N(n_c, n_d)
+  game_status <- matrix(nrow = n_d, ncol=n_c+1)
+
+  for (t in 1:n_d){
+    for (k in 0:n_c){
+      game_status[t, k+1] <- N(t, k) # The k+1 is needed because R indexes starts from 1 and not 0 like the classes
+    }
+  }
+  
+  game_status <- game_status %>% 
+    as.data.frame() %>% 
+    as_tibble() %>% 
+    mutate(time = 1:n_d) %>% 
+    relocate(time)
+  
+  names(game_status) <- c("time", 0:n_c)
+  
+  game_status
+  
+}
+```
+
+```{r}
+tombola <- all_game_status(15, 90) # number fo tombola
+tombola
+```
+
+```{r}
+# tidy dataframe for easier plotting
+tombola_td <- tombola %>% 
+  pivot_longer(-time, names_to = "numbers", values_to = "fraction") %>% 
+  mutate(numbers = factor(numbers, levels = numbers %>%  as.integer() %>% unique())) 
+```
+
+here there are the results for tombola
+ 
+```{r}
+tombola %>% 
+  ggplot() +
+  geom_line(aes(time, `15`)) +
+  labs(y="probability of tombola")
+```
+
+for all classes 
+
+```{r}
+tombola_td %>% 
+  ggplot() +
+  geom_line(aes(time, fraction)) +
+  facet_wrap(~numbers)
+```
+
+Probability of having done at least `k` hits at each time
+
+```{r}
+totalprob <- function(x){
+  end <- length(x)
+  map_dbl(seq_along(x),~sum(x[.x:end]))
+}
+```
+
+```{r}
+tombola_td %>%
+  group_by(time) %>% 
+  summarize(cum_fraction = totalprob(fraction), numbers, .groups="keep") %>% 
+  ggplot() +
+  geom_line(aes(time, cum_fraction)) +
+  facet_wrap(~numbers)
+```
+
+## Minor prizes
+
+the approach is the same for tombola, but instead of having have a card with 15 numbers we use consider the length of the row as a card, in this case 5.
+
+```{r}
+tombola_minor <- all_game_status(5, 90)
+```
+
+```{r}
+tombola_minor_td <- tombola_minor %>% 
+  pivot_longer(-time, names_to = "numbers", values_to = "fraction") %>% 
+  mutate(numbers = factor(numbers, levels = numbers %>%  as.integer() %>% unique()))
+```
+
+
+```{r}
+tombola_minor_td %>% 
+  ggplot() +
+  geom_line(aes(time, fraction)) +
+  facet_wrap(~numbers)
+```
+
+```{r}
+tombola_minor_td %>%
+  group_by(time) %>% 
+  summarize(cum_fraction = totalprob(fraction), numbers, .groups="keep") %>% 
+  ggplot() +
+  geom_line(aes(time, cum_fraction)) +
+  facet_wrap(~numbers)
+```
+
+# Extra
+
+Calculating the total number of possible games and possible card in tombola.
+
+```{r}
+combination <- function(n,k){
+  factorial(n) / (factorial(k) * factorial(n - k))
+}
+permutation <- function(n,k){
+  factorial(n) / factorial(n-k)
+}
+```
+
+total number of possible "games"
+
+```{r}
+permutation(90, 90)
+```
+number of possible cards
+
+```{r}
+combination(90, 15)
+```
